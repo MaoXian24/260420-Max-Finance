@@ -85,6 +85,33 @@ def validate_credentials(wrds_user, wrds_password):
                 pass
 
 
+def get_secret_string(container, key):
+    """Safely read one optional string value from Streamlit secrets."""
+    if container is None:
+        return ""
+    try:
+        value = container.get(key, "")
+    except Exception:
+        value = ""
+    return str(value).strip() if value is not None else ""
+
+
+def load_wrds_secrets():
+    """Load WRDS credentials from Streamlit Cloud secrets if configured."""
+    secret_user = get_secret_string(st.secrets, "WRDS_USER")
+    secret_password = get_secret_string(st.secrets, "WRDS_PASSWORD")
+
+    if not secret_user or not secret_password:
+        try:
+            wrds_block = st.secrets.get("wrds", {})
+        except Exception:
+            wrds_block = {}
+        secret_user = secret_user or get_secret_string(wrds_block, "user")
+        secret_password = secret_password or get_secret_string(wrds_block, "password")
+
+    return secret_user, secret_password
+
+
 def get_industry_avg(sic_code, wrds_user, wrds_password):
     if sic_code is None or pd.isna(sic_code):
         return pd.DataFrame()
@@ -477,10 +504,31 @@ def render_app():
     if "auth_error" not in st.session_state:
         st.session_state.auth_error = ""
 
+    secret_user, secret_password = load_wrds_secrets()
+    has_secret_credentials = bool(secret_user and secret_password)
+    if "use_secret_credentials" not in st.session_state:
+        st.session_state.use_secret_credentials = has_secret_credentials
+
     with st.sidebar:
         st.header("Input Panel")
-        wrds_user = st.text_input("WRDS User", value=st.session_state.cached_wrds_user).strip()
-        wrds_password = st.text_input("WRDS Password", type="password").strip()
+        if has_secret_credentials:
+            use_secret_credentials = st.toggle(
+                "Use Streamlit Secrets credentials",
+                value=st.session_state.use_secret_credentials,
+                help="Recommended for public deployment. Configure WRDS_USER/WRDS_PASSWORD in app secrets.",
+            )
+            st.session_state.use_secret_credentials = use_secret_credentials
+        else:
+            use_secret_credentials = False
+
+        if use_secret_credentials:
+            wrds_user = secret_user
+            wrds_password = secret_password
+            st.caption("Credentials are loaded from Streamlit Secrets.")
+        else:
+            wrds_user = st.text_input("WRDS User", value=st.session_state.cached_wrds_user).strip()
+            wrds_password = st.text_input("WRDS Password", type="password").strip()
+
         ticker = st.text_input("Ticker", value=st.session_state.default_ticker).strip().upper()
         year = st.selectbox("Year", YEAR_OPTIONS, index=len(YEAR_OPTIONS) - 1)
         st.caption("Year selector controls stock data only. Financial, DuPont, SIC use full 2015-2024.")
@@ -500,7 +548,10 @@ def render_app():
             st.session_state.auth_error = "Please enter a ticker symbol."
             clear_runtime_state()
         elif not wrds_user or not wrds_password:
-            st.session_state.auth_error = "Please enter WRDS credentials."
+            if has_secret_credentials:
+                st.session_state.auth_error = "WRDS credentials are missing. Disable secrets mode or check app secrets."
+            else:
+                st.session_state.auth_error = "Please enter WRDS credentials."
             clear_runtime_state()
         else:
             ok, reason = validate_credentials(wrds_user, wrds_password)
