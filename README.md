@@ -76,16 +76,17 @@ Steps:
 1. Push this project to a GitHub repository.
 2. Open Streamlit Community Cloud and choose **Deploy a public app from GitHub**.
 3. Select repository/branch and set the main file to [streamlit_app.py](streamlit_app.py).
-4. In app settings, add WRDS credentials in **Secrets**:
+4. In app settings, click **Advanced settings** and select Python 3.13.
+5. In app settings, add WRDS credentials in **Secrets**:
 
 ```toml
 WRDS_USER = "your_wrds_username"
 WRDS_PASSWORD = "your_wrds_password"
 ```
 
-5. Deploy and open the generated app URL.
+6. Deploy and open the generated app URL.
 
-This repository includes [runtime.txt](runtime.txt) to pin the deployment environment to Python 3.13. That avoids accidental upgrades to Python 3.14, which can cause compatibility problems with WRDS-related packages.
+Streamlit Community Cloud does not use `runtime.txt` to select the Python version here. The supported way is to choose Python 3.13 from **Advanced settings** during deployment.
 
 Notes:
 1. This app supports both secret keys above and nested format (`[wrds] user/password`).
@@ -328,9 +329,9 @@ WRDS_USER = "your_wrds_username"
 WRDS_PASSWORD = "your_wrds_password"
 ```
 
-5. 点击部署并访问生成的公网链接。
+6. 点击部署并访问生成的公网链接。
 
-本仓库包含 [runtime.txt](runtime.txt)，会把部署环境固定到 Python 3.13，避免 Streamlit Cloud 自动升级到 Python 3.14 后，WRDS 相关依赖出现兼容性问题。
+Streamlit Community Cloud 这里不读取 `runtime.txt` 来控制 Python 版本；部署时请在 **Advanced settings** 里手动选择 Python 3.13。
 
 说明：
 1. 本项目同时支持上述扁平写法和嵌套写法（`[wrds] user/password`）。
