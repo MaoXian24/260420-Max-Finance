@@ -85,6 +85,8 @@ WRDS_PASSWORD = "your_wrds_password"
 
 5. Deploy and open the generated app URL.
 
+This repository includes [runtime.txt](runtime.txt) to pin the deployment environment to Python 3.13.3. That avoids accidental upgrades to Python 3.14, which can cause compatibility problems with WRDS-related packages.
+
 Notes:
 1. This app supports both secret keys above and nested format (`[wrds] user/password`).
 2. Never commit real credentials to GitHub.
@@ -231,6 +233,7 @@ This section explains the internal implementation logic and highlights the desig
 - [.streamlit/config.toml](.streamlit/config.toml): Streamlit runtime configuration
 - [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example): secrets template for cloud deployment
 - [.gitignore](.gitignore): ignores local secrets and cache files
+- [runtime.txt](runtime.txt): pins Streamlit Cloud to Python 3.13.3
 
 ## 6. Suggested Demo Flow
 1. Launch web app and complete full analysis path.
@@ -326,6 +329,8 @@ WRDS_PASSWORD = "your_wrds_password"
 ```
 
 5. 点击部署并访问生成的公网链接。
+
+本仓库包含 [runtime.txt](runtime.txt)，会把部署环境固定到 Python 3.13.3，避免 Streamlit Cloud 自动升级到 Python 3.14 后，WRDS 相关依赖出现兼容性问题。
 
 说明：
 1. 本项目同时支持上述扁平写法和嵌套写法（`[wrds] user/password`）。
@@ -470,6 +475,7 @@ WRDS_PASSWORD = "your_wrds_password"
 - [.streamlit/config.toml](.streamlit/config.toml)：Streamlit 运行配置
 - [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)：云部署 Secrets 示例模板
 - [.gitignore](.gitignore)：忽略本地密钥与缓存文件
+- [runtime.txt](runtime.txt)：将 Streamlit Cloud 的 Python 版本固定为 3.13.3
 
 ### 6. 演示建议流程
 1. 先运行网页版，完整展示查询到导出的全流程。
