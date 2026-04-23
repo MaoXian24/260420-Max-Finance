@@ -11,6 +11,7 @@ from wrds.sql import WRDS_CONNECT_ARGS, WRDS_POSTGRES_DB, WRDS_POSTGRES_HOST, WR
 
 warnings.filterwarnings("ignore")
 
+# Global constants used across queries, chart formatting, and defaults.
 SHROUT_MULTIPLIER = 1000
 YEAR_OPTIONS = [str(y) for y in range(2015, 2025)]
 DEFAULT_TICKER_POOL = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA"]
@@ -112,6 +113,10 @@ def load_wrds_secrets():
     return secret_user, secret_password
 
 
+# ============================
+# SIC Industry Benchmark Query
+# ============================
+# Pulls yearly SIC peer averages from Compustat funda for 2015-2024.
 def get_industry_avg(sic_code, wrds_user, wrds_password):
     if sic_code is None or pd.isna(sic_code):
         return pd.DataFrame()
@@ -153,6 +158,8 @@ def get_industry_avg(sic_code, wrds_user, wrds_password):
 
 
 def get_company_info(ticker, wrds_user, wrds_password):
+    # Tries Compustat funda first (latest valid record), then falls back to
+    # comp.company SIC when no funda row is available.
     conn = None
     try:
         conn = open_wrds_connection(wrds_user, wrds_password)
@@ -197,6 +204,10 @@ def get_year_quarters(year):
     ]
 
 
+# ============================
+# Daily Stock Data (CRSP)
+# ============================
+# Pulls selected-year daily pricing/return/volume/share-outstanding data.
 def get_single_year_daily(ticker, year, wrds_user, wrds_password):
     quarters = get_year_quarters(year)
     all_data = []
@@ -219,6 +230,7 @@ def get_single_year_daily(ticker, year, wrds_user, wrds_password):
                 pass
 
     for start_date, end_date in quarters:
+        # Query by quarter windows to keep request sizes manageable.
         conn = None
         try:
             conn = open_wrds_connection(wrds_user, wrds_password)
@@ -258,12 +270,16 @@ def get_single_year_daily(ticker, year, wrds_user, wrds_password):
     return stock_df, ""
 
 
+# ============================
+# Financial Statement + DuPont Metrics
+# ============================
+# Pulls annual fundamentals and computes DuPont decomposition components.
 def get_financial_data(ticker, wrds_user, wrds_password):
     conn = None
     try:
         conn = open_wrds_connection(wrds_user, wrds_password)
         sql = """
-        SELECT gvkey, tic, conm, datadate, ni, sale, at, ceq, lt,
+        SELECT gvkey, tic, conm, datadate, ni, sale, at, ceq, lt, ebit, pi,
         ROUND(ni/sale,4) as profit_margin, ROUND(sale/at,4) as asset_turnover,
         ROUND(at/ceq,4) as equity_multiplier, ROUND((ni/sale)*(sale/at)*(at/ceq),4) as roe_dupont
         FROM comp.funda
@@ -280,12 +296,58 @@ def get_financial_data(ticker, wrds_user, wrds_password):
             "at": "TotalAssets",
             "lt": "TotalLiabs",
             "ceq": "TotalEquity",
+            "ebit": "EBIT",
+            "pi": "PretaxIncome",
             "profit_margin": "ProfitMargin",
             "asset_turnover": "AssetTurnover",
             "equity_multiplier": "EqMultiplier",
             "roe_dupont": "ROE_DuPont",
         }
-        return df.rename(columns=rename)
+        out_df = df.rename(columns=rename)
+        for required_col in [
+            "NetIncome",
+            "Revenue",
+            "TotalAssets",
+            "TotalLiabs",
+            "TotalEquity",
+            "EBIT",
+            "PretaxIncome",
+            "ProfitMargin",
+            "AssetTurnover",
+            "EqMultiplier",
+            "ROE_DuPont",
+        ]:
+            if required_col not in out_df.columns:
+                out_df[required_col] = pd.NA
+
+        # Add robust extended metrics using existing fields only.
+        def safe_div(numerator_col, denominator_col):
+            numerator = pd.to_numeric(out_df.get(numerator_col), errors="coerce")
+            denominator = pd.to_numeric(out_df.get(denominator_col), errors="coerce")
+            denominator = denominator.replace(0, pd.NA)
+            return numerator / denominator
+
+        out_df["ROA"] = safe_div("NetIncome", "TotalAssets")
+        out_df["DebtRatio"] = safe_div("TotalLiabs", "TotalAssets")
+        out_df["DebtToEquity"] = safe_div("TotalLiabs", "TotalEquity")
+        out_df["EquityRatio"] = safe_div("TotalEquity", "TotalAssets")
+        out_df["CapitalIntensity"] = safe_div("TotalAssets", "Revenue")
+        out_df["LiabilityToRevenue"] = safe_div("TotalLiabs", "Revenue")
+        out_df["EBITMargin"] = safe_div("EBIT", "Revenue")
+        out_df["PretaxMargin"] = safe_div("PretaxIncome", "Revenue")
+        out_df["TaxBurden"] = safe_div("NetIncome", "PretaxIncome")
+        out_df["InterestBurden"] = safe_div("PretaxIncome", "EBIT")
+        out_df["EBITToAssets"] = safe_div("EBIT", "TotalAssets")
+
+        # ROC uses TotalEquity + TotalLiabs as a simple capital base.
+        capital_base = (
+            pd.to_numeric(out_df.get("TotalEquity"), errors="coerce")
+            + pd.to_numeric(out_df.get("TotalLiabs"), errors="coerce")
+        )
+        capital_base = capital_base.replace(0, pd.NA)
+        out_df["ROC"] = pd.to_numeric(out_df.get("NetIncome"), errors="coerce") / capital_base
+
+        return out_df
     except Exception:
         return pd.DataFrame()
     finally:
@@ -362,8 +424,13 @@ def make_multi_line_chart(
 
 
 def inject_custom_css():
-    st.markdown(
-        """
+    # Injects all visual styles for section headers and table themes.
+    base = st.get_option("theme.base") or "light"
+    section_title_color = "#D1D5DB" if base == "dark" else "#6B7280"
+    table_title_color = "#D1D5DB" if base == "dark" else "#6B7280"
+    table_header_text_color = "#FFFFFF"
+    table_body_text_color = "#4B5563"
+    css = """
         <style>
         .mf-section-title {
             font-size: 2rem;
@@ -371,7 +438,7 @@ def inject_custom_css():
             line-height: 1.2;
             margin-top: 1.1rem;
             margin-bottom: 0.7rem;
-            color: #E7EDF7;
+            color: __SECTION_TITLE_COLOR__ !important;
             border-left: 6px solid var(--accent);
             padding: 0.18rem 0 0.18rem 0.7rem;
             border-radius: 2px;
@@ -380,6 +447,7 @@ def inject_custom_css():
             font-size: 1.08rem;
             font-weight: 700;
             margin: 0.65rem 0 0.25rem 0;
+            color: __TABLE_TITLE_COLOR__ !important;
         }
         .mf-table-wrap {
             width: 100%;
@@ -399,30 +467,39 @@ def inject_custom_css():
             font-size: 0.89rem;
             white-space: nowrap;
         }
-        .mf-table-wrap.profile th { background: #16324F; color: #F8FAFC; }
-        .mf-table-wrap.profile tbody tr:nth-child(odd) td { background: #E9F2FA; color: #1E293B; }
-        .mf-table-wrap.profile tbody tr:nth-child(even) td { background: #F4F8FC; color: #1E293B; }
+        .mf-table-wrap.profile th { background: #16324F; color: __TABLE_HEADER_TEXT_COLOR__; }
+        .mf-table-wrap.profile tbody tr:nth-child(odd) td { background: #E9F2FA; color: __TABLE_BODY_TEXT_COLOR__; }
+        .mf-table-wrap.profile tbody tr:nth-child(even) td { background: #F4F8FC; color: __TABLE_BODY_TEXT_COLOR__; }
 
-        .mf-table-wrap.stock th { background: #0F766E; color: #ECFEFF; }
-        .mf-table-wrap.stock tbody tr:nth-child(odd) td { background: #D1FAE5; color: #1F2937; }
-        .mf-table-wrap.stock tbody tr:nth-child(even) td { background: #ECFDF5; color: #1F2937; }
+        .mf-table-wrap.stock th { background: #0F766E; color: __TABLE_HEADER_TEXT_COLOR__; }
+        .mf-table-wrap.stock tbody tr:nth-child(odd) td { background: #D1FAE5; color: __TABLE_BODY_TEXT_COLOR__; }
+        .mf-table-wrap.stock tbody tr:nth-child(even) td { background: #ECFDF5; color: __TABLE_BODY_TEXT_COLOR__; }
 
-        .mf-table-wrap.financial th { background: #92400E; color: #FFF7ED; }
-        .mf-table-wrap.financial tbody tr:nth-child(odd) td { background: #FFEDD5; color: #3F3F46; }
-        .mf-table-wrap.financial tbody tr:nth-child(even) td { background: #FFF7ED; color: #3F3F46; }
+        .mf-table-wrap.financial th { background: #92400E; color: __TABLE_HEADER_TEXT_COLOR__; }
+        .mf-table-wrap.financial tbody tr:nth-child(odd) td { background: #FFEDD5; color: __TABLE_BODY_TEXT_COLOR__; }
+        .mf-table-wrap.financial tbody tr:nth-child(even) td { background: #FFF7ED; color: __TABLE_BODY_TEXT_COLOR__; }
 
-        .mf-table-wrap.industry th { background: #4C1D95; color: #F5F3FF; }
-        .mf-table-wrap.industry tbody tr:nth-child(odd) td { background: #EDE9FE; color: #334155; }
-        .mf-table-wrap.industry tbody tr:nth-child(even) td { background: #F5F3FF; color: #334155; }
+        .mf-table-wrap.industry th { background: #4C1D95; color: __TABLE_HEADER_TEXT_COLOR__; }
+        .mf-table-wrap.industry tbody tr:nth-child(odd) td { background: #EDE9FE; color: __TABLE_BODY_TEXT_COLOR__; }
+        .mf-table-wrap.industry tbody tr:nth-child(even) td { background: #F5F3FF; color: __TABLE_BODY_TEXT_COLOR__; }
         </style>
-        """,
+        """
+    css = (
+        css.replace("__SECTION_TITLE_COLOR__", section_title_color)
+        .replace("__TABLE_TITLE_COLOR__", table_title_color)
+        .replace("__TABLE_HEADER_TEXT_COLOR__", table_header_text_color)
+        .replace("__TABLE_BODY_TEXT_COLOR__", table_body_text_color)
+    )
+    st.markdown(
+        css,
         unsafe_allow_html=True,
     )
 
 
-def render_section_title(number, title, accent_color):
+def render_section_title(number, title, accent_color, text_color=None):
+    extra_style = f" color: {text_color};" if text_color else ""
     st.markdown(
-        f'<div class="mf-section-title" style="--accent: {accent_color};">{number}. {title}</div>',
+        f'<div class="mf-section-title" style="--accent: {accent_color};{extra_style}">{number}. {title}</div>',
         unsafe_allow_html=True,
     )
 
@@ -434,7 +511,35 @@ def render_table_block(title, df, theme, max_rows=None):
     st.markdown(f"<div class='mf-table-wrap {theme}'>{table_html}</div>", unsafe_allow_html=True)
 
 
+def render_metric_button_group(label, options, state_key, columns_per_row=4):
+    # Renders flat metric buttons and persists the selected option in session state.
+    st.markdown(f"<div class='mf-table-title'>{label}</div>", unsafe_allow_html=True)
+    current = st.session_state.get(state_key, options[0])
+    if current not in options:
+        current = options[0]
+        st.session_state[state_key] = current
+
+    def select_metric(option):
+        st.session_state[state_key] = option
+
+    for row_start in range(0, len(options), columns_per_row):
+        row_options = options[row_start:row_start + columns_per_row]
+        columns = st.columns(len(row_options), gap="small")
+        for column, option in zip(columns, row_options):
+            column.button(
+                option,
+                key=f"{state_key}_{option}",
+                use_container_width=True,
+                type="primary" if option == current else "secondary",
+                on_click=select_metric,
+                args=(option,),
+            )
+
+    return st.session_state.get(state_key, current)
+
+
 def build_excel(info_df, stock_df, financial_df, industry_df, ticker, year):
+    # Exports all retrieved datasets into one multi-sheet Excel workbook.
     file_name = f"{ticker}_{year}_Full_Data.xlsx"
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -443,7 +548,7 @@ def build_excel(info_df, stock_df, financial_df, industry_df, ticker, year):
         if stock_df is not None and not stock_df.empty:
             stock_df.to_excel(writer, sheet_name="Stock_Data", index=False)
         if financial_df is not None and not financial_df.empty:
-            financial_df.to_excel(writer, sheet_name="Financial_DuPont", index=False)
+            financial_df.to_excel(writer, sheet_name="Financial_Data", index=False)
         if industry_df is not None and not industry_df.empty:
             industry_df.to_excel(writer, sheet_name="Industry_Avg", index=False)
     output.seek(0)
@@ -451,6 +556,7 @@ def build_excel(info_df, stock_df, financial_df, industry_df, ticker, year):
 
 
 def run_query(ticker, year, wrds_user, wrds_password):
+    # End-to-end query orchestration used by the Search action.
     result = {
         "info_df": pd.DataFrame(),
         "stock_df": pd.DataFrame(),
@@ -484,12 +590,15 @@ def run_query(ticker, year, wrds_user, wrds_password):
 
 
 def render_app():
+    # Main Streamlit entry point: input panel, query handling, charts, tables, download.
     st.set_page_config(page_title="Max Finance", layout="wide")
     inject_custom_css()
     st.title("Max Finance")
-    st.caption("Enhanced visualization edition with dynamic metric selectors and 2015-2024 long-range analysis.")
+    st.caption("A Python-based WRDS-powered U.S. equity data retrieval platform.")
+    section_text_color = "#D1D5DB" if (st.get_option("theme.base") or "light") == "dark" else "#6B7280"
 
     if "default_ticker" not in st.session_state:
+        # Easter egg: assign a random default ticker at first load.
         st.session_state.default_ticker = random.choice(DEFAULT_TICKER_POOL)
 
     if "result" not in st.session_state:
@@ -510,6 +619,7 @@ def render_app():
         st.session_state.use_secret_credentials = has_secret_credentials
 
     with st.sidebar:
+        # Sidebar handles credentials, ticker input, and one-year stock selector.
         st.header("Input Panel")
         if has_secret_credentials:
             use_secret_credentials = st.toggle(
@@ -532,7 +642,7 @@ def render_app():
         ticker = st.text_input("Ticker", value=st.session_state.default_ticker).strip().upper()
         year = st.selectbox("Year", YEAR_OPTIONS, index=len(YEAR_OPTIONS) - 1)
         st.caption("Year selector controls stock data only. Financial, DuPont, SIC use full 2015-2024.")
-        run_btn = st.button("Run Analysis", width="stretch")
+        run_btn = st.button("Search", width="stretch")
 
     # Cache credentials in session state; reset previous result when credentials change.
     current_fingerprint = build_credential_fingerprint(wrds_user, wrds_password) if wrds_user and wrds_password else ""
@@ -543,6 +653,7 @@ def render_app():
         clear_runtime_state()
 
     if run_btn:
+        # Validate inputs and credentials before executing full WRDS queries.
         st.session_state.auth_error = ""
         if not ticker:
             st.session_state.auth_error = "Please enter a ticker symbol."
@@ -570,7 +681,7 @@ def render_app():
     result = st.session_state.result
     if result is None:
         if not st.session_state.auth_error:
-            st.info("Enter WRDS credentials and click Run Analysis.")
+            st.info("Ready")
         return
 
     info_df = result["info_df"]
@@ -584,23 +695,23 @@ def render_app():
         except Exception:
             current_sic = "-"
 
-    render_section_title(1, "Stock Data Visualization", "#38BDF8")
+    render_section_title(1, "Stock Data Visualization", "#38BDF8", text_color=section_text_color)
     if stock_df is None or stock_df.empty:
         st.write("No pricing data available.")
         if result["stock_reason"]:
             st.caption(f"Reason: {result['stock_reason']}")
     else:
         stock_metric_map = {
+            "Market Cap": "market_cap",
             "Close": "close",
             "Daily Return": "daily_return",
             "Volume": "volume",
-            "Market Cap": "market_cap",
         }
-        stock_pick = st.selectbox(
+        st.session_state.setdefault("stock_metric_pick", "Market Cap")
+        stock_pick = render_metric_button_group(
             "Select one stock metric",
-            options=list(stock_metric_map.keys()),
-            index=3,
-            key="stock_metric_pick",
+            list(stock_metric_map.keys()),
+            "stock_metric_pick",
         )
         selected_series = [(stock_metric_map[stock_pick], stock_pick)]
         stock_fig = make_multi_line_chart(
@@ -614,29 +725,31 @@ def render_app():
         )
         st.pyplot(stock_fig, clear_figure=True)
 
-    render_section_title(2, "Financial Statement Visualization", "#F59E0B")
+    render_section_title(2, "Financial Data Visualization", "#F59E0B", text_color=section_text_color)
     if financial_df is None or financial_df.empty:
         st.write("No data.")
     else:
         financial_metric_map = {
             "Revenue": "Revenue",
             "Net Income": "NetIncome",
+            "EBIT": "EBIT",
+            "Pretax Income": "PretaxIncome",
             "Total Assets": "TotalAssets",
             "Total Liabilities": "TotalLiabs",
             "Total Equity": "TotalEquity",
         }
-        fin_pick = st.selectbox(
-            "Select one financial metric",
-            options=list(financial_metric_map.keys()),
-            index=0,
-            key="financial_metric_pick",
+        st.session_state.setdefault("financial_metric_pick", "Revenue")
+        fin_pick = render_metric_button_group(
+            "Select one reported fundamentals metric",
+            list(financial_metric_map.keys()),
+            "financial_metric_pick",
         )
         fin_series = [(financial_metric_map[fin_pick], fin_pick)]
         fin_fig = make_multi_line_chart(
             financial_df,
             "Date",
             fin_series,
-            f"{st.session_state.last_ticker} Financial Trend (2015-2024)",
+            f"{st.session_state.last_ticker} Reported Fundamentals Trend (2015-2024)",
             "USD",
             is_currency=True,
             fixed_color="#F59E0B",
@@ -644,35 +757,47 @@ def render_app():
         )
         st.pyplot(fin_fig, clear_figure=True)
 
-    render_section_title(3, "DuPont Visualization", "#34D399")
+    render_section_title(3, "Derived Metrics Visualization", "#34D399", text_color=section_text_color)
     if financial_df is None or financial_df.empty:
         st.write("No data.")
     else:
         dupont_metric_map = {
-            "Profit Margin": "ProfitMargin",
-            "Asset Turnover": "AssetTurnover",
-            "Equity Multiplier": "EqMultiplier",
             "ROE (DuPont)": "ROE_DuPont",
+            "Profit Margin (DuPont)": "ProfitMargin",
+            "Asset Turnover (DuPont)": "AssetTurnover",
+            "Equity Multiplier (DuPont)": "EqMultiplier",
+            "ROA": "ROA",
+            "Debt Ratio": "DebtRatio",
+            "Debt to Equity": "DebtToEquity",
+            "Equity Ratio": "EquityRatio",
+            "ROC": "ROC",
+            "Capital Intensity": "CapitalIntensity",
+            "Liability to Revenue": "LiabilityToRevenue",
+            "EBIT Margin": "EBITMargin",
+            "Pretax Margin": "PretaxMargin",
+            "Tax Burden": "TaxBurden",
+            "Interest Burden": "InterestBurden",
+            "EBIT to Assets": "EBITToAssets",
         }
-        dupont_pick = st.selectbox(
-            "Select one DuPont metric",
-            options=list(dupont_metric_map.keys()),
-            index=3,
-            key="dupont_metric_pick",
+        st.session_state.setdefault("dupont_metric_pick", "ROE (DuPont)")
+        dupont_pick = render_metric_button_group(
+            "Select one derived metric",
+            list(dupont_metric_map.keys()),
+            "dupont_metric_pick",
         )
         dupont_series = [(dupont_metric_map[dupont_pick], dupont_pick)]
         dupont_fig = make_multi_line_chart(
             financial_df,
             "Date",
             dupont_series,
-            f"{st.session_state.last_ticker} DuPont Trend (2015-2024)",
+            f"{st.session_state.last_ticker} Derived Metrics Trend (2015-2024)",
             "Ratio",
             is_currency=False,
             fixed_color="#34D399",
         )
         st.pyplot(dupont_fig, clear_figure=True)
 
-    render_section_title(4, "SIC Industry Visualization", "#A78BFA")
+    render_section_title(4, "SIC Industry Visualization", "#A78BFA", text_color=section_text_color)
     if industry_df is not None and not industry_df.empty:
         industry_metric_map = {
             "Avg Sale": "avg_sale",
@@ -680,11 +805,11 @@ def render_app():
             "Avg Common Equity": "avg_common_equity",
             "Observations": "num_obs",
         }
-        industry_pick = st.selectbox(
+        st.session_state.setdefault("industry_metric_pick", "Avg Sale")
+        industry_pick = render_metric_button_group(
             "Select one industry metric",
-            options=list(industry_metric_map.keys()),
-            index=0,
-            key="industry_metric_pick",
+            list(industry_metric_map.keys()),
+            "industry_metric_pick",
         )
         industry_series = [(industry_metric_map[industry_pick], industry_pick)]
         ind_fig = make_multi_line_chart(
@@ -704,7 +829,8 @@ def render_app():
         if result["industry_reason"]:
             st.caption(f"Reason: {result['industry_reason']}")
 
-    render_section_title(5, "All Data Tables", "#22D3EE")
+    render_section_title(5, "All Data Tables", "#22D3EE", text_color=section_text_color)
+    # Tables are grouped after charts for quick scan first, detail inspection second.
     st.caption("Tables are grouped below after the chart sections.")
 
     if info_df is None or info_df.empty:
@@ -720,21 +846,42 @@ def render_app():
     if financial_df is None or financial_df.empty:
         st.write("No financial data.")
     else:
-        cols = [
+        reported_cols = [
             "Ticker",
             "Date",
             "NetIncome",
+            "EBIT",
+            "PretaxIncome",
             "Revenue",
             "TotalAssets",
             "TotalLiabs",
             "TotalEquity",
+        ]
+        reported_df = financial_df[[c for c in reported_cols if c in financial_df.columns]]
+        render_table_block("Reported Fundamentals Data (2015-2024)", reported_df, "financial")
+
+        derived_cols = [
+            "Ticker",
+            "Date",
             "ProfitMargin",
             "AssetTurnover",
             "EqMultiplier",
             "ROE_DuPont",
+            "ROA",
+            "ROC",
+            "DebtRatio",
+            "DebtToEquity",
+            "EquityRatio",
+            "CapitalIntensity",
+            "LiabilityToRevenue",
+            "EBITMargin",
+            "PretaxMargin",
+            "TaxBurden",
+            "InterestBurden",
+            "EBITToAssets",
         ]
-        show_df = financial_df[[c for c in cols if c in financial_df.columns]]
-        render_table_block("Financial and DuPont Data (2015-2024)", show_df, "financial")
+        derived_df = financial_df[[c for c in derived_cols if c in financial_df.columns]]
+        render_table_block("Derived Metrics Data (2015-2024)", derived_df, "financial")
 
     if industry_df is None or industry_df.empty:
         st.write("No industry data.")
